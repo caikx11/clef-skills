@@ -1,0 +1,148 @@
+From fe322c9df4dfd2e49db2c342b92f0cd866b7f1d9 Mon Sep 17 00:00:00 2001
+From: caikx11 <caikx11@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 13:18:54 -0300
+Subject: [PATCH 2/4] Opt-in low-VRAM Full: embeddings in host RAM
+ (CLEF_ALLOW_LOW_VRAM_FULL, CLEF_OFFLOAD_EMBEDDINGS)
+
+---
+ Dockerfile.full-offload   |  7 +++++
+ clef_service/app.py       | 17 ++++++++++-
+ clef_service/hardware.py  |  3 +-
+ runtime/cpu_embeddings.py | 60 +++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 85 insertions(+), 2 deletions(-)
+ create mode 100644 Dockerfile.full-offload
+ create mode 100644 runtime/cpu_embeddings.py
+
+diff --git a/Dockerfile.full-offload b/Dockerfile.full-offload
+new file mode 100644
+index 0000000..c551176
+--- /dev/null
++++ b/Dockerfile.full-offload
+@@ -0,0 +1,7 @@
++# Overlay on a locally built clef:local image: Full on <22 GiB GPUs by keeping the
++# dense embedding tables in host RAM (opt-in, see README section "Low-VRAM Full").
++ARG BASE=clef:local
++FROM ${BASE}
++COPY --chown=clef:clef clef_service/ /app/clef_service/
++COPY --chown=clef:clef runtime/ /app/runtime/
++ENV CLEF_ALLOW_LOW_VRAM_FULL=1 CLEF_OFFLOAD_EMBEDDINGS=1
+diff --git a/clef_service/app.py b/clef_service/app.py
+index 33b6a45..46d04cd 100644
+--- a/clef_service/app.py
++++ b/clef_service/app.py
+@@ -166,9 +166,12 @@ def load_model():
+     if not MODEL_DIR.exists():
+         kwargs["quantization_config"] = quant
+     compact_checkpoint = (MODEL_DIR / "compact_quantization.json").is_file()
++    offload_embeddings = os.environ.get("CLEF_OFFLOAD_EMBEDDINGS") == "1"
++    if offload_embeddings and (compact_checkpoint or PROFILE_NAME != "full"):
++        raise RuntimeError("CLEF_OFFLOAD_EMBEDDINGS=1 applies only to the Full profile (dense BF16 embeddings)")
+     loaded, proc = load_release_model(
+         MODEL_DIR if MODEL_DIR.exists() else ROOT / "source",
+-        device="cpu" if compact_checkpoint else "cuda:0", dtype=COMPUTE_DTYPE, **kwargs,
++        device="cpu" if compact_checkpoint or offload_embeddings else "cuda:0", dtype=COMPUTE_DTYPE, **kwargs,
+     )
+     quantized = [m for m in loaded.language_model.modules() if isinstance(m, bnb.nn.Linear4bit)]
+     count = len(quantized)
+@@ -192,6 +195,18 @@ def load_model():
+             raise RuntimeError("Clef parameters did not all move to the selected GPU")
+         gc.collect()
+         torch.cuda.empty_cache()
++    if offload_embeddings:
++        # Dense embedding tables stay in host RAM (lookups only); the rest moves to the GPU.
++        from cpu_embeddings import offload_embeddings as move_embeddings_to_host
++        from accelerate.hooks import remove_hook_from_module
++        move_embeddings_to_host(loaded, torch.device("cuda:0"))
++        remove_hook_from_module(loaded.language_model, recurse=True)
++        gc.collect()
++        loaded.to(device="cuda:0")
++        loaded.language_model.hf_device_map = {"": "cuda:0"}
++        gc.collect()
++        torch.cuda.empty_cache()
++        log.info("Dense embeddings kept on CPU (CLEF_OFFLOAD_EMBEDDINGS=1)")
+     from transformers.models.qwen3_5 import modeling_qwen3_5 as qwen
+     if os.environ.get("CLEF_DISABLE_FUSED_KERNELS") == "1":
+         from transformers.models.qwen3_5.modeling_qwen3_5 import (
+diff --git a/clef_service/hardware.py b/clef_service/hardware.py
+index e6b3fbe..1dd18ec 100644
+--- a/clef_service/hardware.py
++++ b/clef_service/hardware.py
+@@ -44,7 +44,8 @@ def choose_strategy(name, major, minor, total_mib, profile, kernel_arches=None):
+         raise ValueError("Model must be flash or full")
+     if (major, minor) < (7, 5):
+         raise ValueError("This CUDA build requires NVIDIA SM75 or newer")
+-    if profile == "full" and (major < 8 or total_mib < 22000):
++    low_vram_full = os.environ.get("CLEF_ALLOW_LOW_VRAM_FULL") == "1"
++    if profile == "full" and (major < 8 or (total_mib < 22000 and not low_vram_full)):
+         raise ValueError("Full NF4 requires a BF16-capable GPU with at least 22 GiB VRAM; use Flash on this GPU")
+     if profile == "flash" and total_mib < 7800:
+         raise ValueError("Flash compact NF4 requires at least 8 GB VRAM")
+diff --git a/runtime/cpu_embeddings.py b/runtime/cpu_embeddings.py
+new file mode 100644
+index 0000000..c0d243c
+--- /dev/null
++++ b/runtime/cpu_embeddings.py
+@@ -0,0 +1,60 @@
++"""Opt-in low-VRAM Full: keep the dense BF16 embedding tables in host RAM.
++
++The input embedding is only used as a row lookup, and Clef's decision head only
++looks up lexical rows of the output embedding, so neither table needs the GPU.
++The tables are stored as plain tensors (not Parameters), so they do not appear in
++``model.parameters()`` and the single-GPU parameter checks stay strict.
++"""
++import torch
++import torch.nn.functional as F
++
++
++class CpuEmbedding(torch.nn.Module):
++    def __init__(self, embedding):
++        super().__init__()
++        self.table = embedding.weight.data.detach().to("cpu").contiguous()
++        self.num_embeddings, self.embedding_dim = self.table.shape
++        self.padding_idx = embedding.padding_idx
++
++    @property
++    def weight(self):
++        return self.table
++
++    def forward(self, ids):
++        return F.embedding(ids.to("cpu"), self.table, self.padding_idx).to(ids.device, non_blocking=True)
++
++
++class CpuRows:
++    """Tensor-like view used by the head: ``rows[token_ids]`` returns CUDA rows."""
++    def __init__(self, table, device):
++        self.table, self.device = table, device
++        self.dtype, self.shape = table.dtype, table.shape
++
++    def is_floating_point(self):
++        return True
++
++    def __getitem__(self, ids):
++        return self.table[ids.to("cpu")].to(self.device)
++
++
++class CpuLMHead(torch.nn.Module):
++    def __init__(self, head, device):
++        super().__init__()
++        self.weight = CpuRows(head.weight.data.detach().to("cpu").contiguous(), device)
++        self.in_features, self.out_features = head.in_features, head.out_features
++
++    def forward(self, hidden):
++        raise RuntimeError("Clef never computes full-vocabulary logits; the output table is row-lookup only")
++
++
++def offload_embeddings(loaded, device):
++    """Replace both dense tables by host-side lookups. Call before moving to the GPU."""
++    backbone = loaded.language_model
++    tied = backbone.get_input_embeddings().weight.data_ptr() == backbone.get_output_embeddings().weight.data_ptr()
++    backbone.set_input_embeddings(CpuEmbedding(backbone.get_input_embeddings()))
++    if tied:
++        backbone.set_output_embeddings(CpuLMHead(backbone.get_output_embeddings(), device))
++        backbone.get_output_embeddings().weight.table = backbone.get_input_embeddings().table
++    else:
++        backbone.set_output_embeddings(CpuLMHead(backbone.get_output_embeddings(), device))
++    return loaded
+-- 
+2.56.0.windows.1
+

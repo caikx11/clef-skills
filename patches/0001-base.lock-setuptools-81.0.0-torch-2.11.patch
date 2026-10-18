@@ -1,0 +1,25 @@
+From 508b0e3d9a6b2445f3e35061deb473aae736fe3f Mon Sep 17 00:00:00 2001
+From: caikx11 <caikx11@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 13:16:37 -0300
+Subject: [PATCH 1/4] base.lock: setuptools 81.0.0 (torch 2.11)
+
+---
+ requirements/base.lock | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/requirements/base.lock b/requirements/base.lock
+index 0ab153d..e785c8b 100644
+--- a/requirements/base.lock
++++ b/requirements/base.lock
+@@ -50,7 +50,7 @@ pyyaml==6.0.3
+ regex==2026.9.29
+ rich==15.0.0
+ safetensors==0.8.0
+-setuptools==84.0.0
++setuptools==81.0.0
+ shellingham==1.5.4
+ starlette==1.7.0
+ sympy==1.14.0
+-- 
+2.56.0.windows.1
+
