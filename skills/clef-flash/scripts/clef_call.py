@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Cliente do Clef Flash local (somente biblioteca padrao). Subcomandos: status, ask, start, stop."""
-import argparse, json, os, shutil, subprocess, sys, time, urllib.request, urllib.error
+"""Cliente do Clef Flash local (GGUF/llama.cpp) (somente biblioteca padrao). Subcomandos: status, ask, start, stop."""
+import argparse, json, os, shutil, subprocess, sys, tempfile, time, urllib.request, urllib.error
 from urllib.parse import urlparse
 
 # Flash e Full nao cabem juntos nos 16 GB de VRAM: so um roda por vez.
+# Backend do Flash: servidor llama.cpp GGUF Q4_K_M (clef-gguf.ps1), porta 8080. O container Docker clef-flash fica de reserva.
 MODELS = {
     "flash": {"container": "clef-flash", "url": "http://127.0.0.1:8080", "api": "clef-flash"},
     "full": {"container": "clef-full", "url": "http://127.0.0.1:8081", "api": "clef"},
@@ -12,6 +13,7 @@ ENV_URL = os.environ.get("CLEF_URL", "").rstrip("/")
 OWN = "flash"
 OTHER = "full"
 URL = ENV_URL or MODELS[OWN]["url"]
+GGUF_PS1 = os.path.join(os.environ.get("USERPROFILE", os.path.expanduser("~")), "tools", "clef-gguf", "clef-gguf.ps1")
 DOCKER_FALLBACK = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "DockerDesktop", "resources", "bin", "docker.exe")
 
 
@@ -62,16 +64,47 @@ def cstate(m):
 
 
 def ready(m, timeout=5):
+    # Flash (GGUF/llama.cpp) expoe /health; Full (Docker) expoe /readyz. Fallback cruzado.
+    paths = ("/health", "/readyz") if m == OWN else ("/readyz", "/health")
+    for p in paths:
+        try:
+            r = http(p, timeout=timeout, base=murl(m))
+            if r.get("status") == "ok":
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def gguf(action):
+    """Executa clef-gguf.ps1 e devolve (json|None, erro)."""
+    if not os.path.exists(GGUF_PS1):
+        return None, "clef-gguf.ps1 nao encontrado: " + GGUF_PS1
     try:
-        return http("/readyz", timeout=timeout, base=murl(m)).get("status") == "ok"
+        # Saida em arquivo (nao pipe): o llama-server em background herda o handle e um pipe nunca fecharia.
+        with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as fo:
+            r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", GGUF_PS1, action],
+                               stdin=subprocess.DEVNULL, stdout=fo, stderr=subprocess.STDOUT, timeout=180)
+            fo.seek(0)
+            txt = fo.read().strip()
+    except Exception as e:
+        return None, str(e)
+    try:
+        return json.loads(txt.splitlines()[-1]), ""
     except Exception:
-        return False
+        return None, (txt or "saida invalida de clef-gguf.ps1")[:300]
+
+
+def gguf_state():
+    j, _ = gguf("status")
+    return "running" if j and j.get("alive") else "stopped"
 
 
 def active():
-    for m in MODELS:
-        if cstate(m) == "running":
-            return m
+    if gguf_state() == "running":
+        return OWN
+    if cstate(OTHER) == "running":
+        return OTHER
     return None
 
 
@@ -81,15 +114,26 @@ def resolve(a):
 
 def cmd_status(a):
     res = {"modelos": {}, "ativo": None}
-    for m in MODELS:
-        c = cstate(m)
-        info = {"container": c, "url": murl(m)}
-        if c == "running":
-            info["readyz"] = "ok" if ready(m, min(a.timeout, 10)) else "indisponivel"
-            res["ativo"] = res["ativo"] or m
-        res["modelos"][m] = info
-    res["ok"] = res["modelos"][OWN].get("readyz") == "ok"
+    g = gguf_state()
+    info = {"backend": "gguf-llama.cpp", "processo": g, "url": murl(OWN)}
+    if g == "running":
+        info["health"] = "ok" if ready(OWN, min(a.timeout, 10)) else "indisponivel"
+        res["ativo"] = OWN
+    res["modelos"][OWN] = info
+    c = cstate(OTHER)
+    info2 = {"container": c, "url": murl(OTHER)}
+    if c == "running":
+        info2["readyz"] = "ok" if ready(OTHER, min(a.timeout, 10)) else "indisponivel"
+        res["ativo"] = res["ativo"] or OTHER
+    res["modelos"][OTHER] = info2
+    res["docker_flash_reserva"] = cstate_name("clef-flash")
+    res["ok"] = info.get("health") == "ok"
     out(res)
+
+
+def cstate_name(name):
+    st, _ = docker("inspect", "-f", "{{.State.Status}}", name)
+    return st or "desconhecido"
 
 
 def cmd_ctl(a):
@@ -99,18 +143,21 @@ def cmd_ctl(a):
             _, err = docker("stop", MODELS[OTHER]["container"])
             if err:
                 out({"ok": False, "erro": "falha ao parar %s: %s" % (OTHER, err)}, 1)
-        if cstate(m) != "running":
-            _, err = docker("start", MODELS[m]["container"])
+        if cstate_name("clef-flash") == "running":
+            _, err = docker("stop", "clef-flash")
             if err:
-                out({"ok": False, "erro": "falha ao iniciar %s: %s" % (m, err)}, 1)
+                out({"ok": False, "erro": "falha ao parar container clef-flash: " + err}, 1)
         t0 = time.time()
-        while time.time() - t0 < 300:
+        j, err = gguf("start")
+        if not j or not j.get("ok"):
+            out({"ok": False, "erro": (j or {}).get("erro") or err}, 1)
+        while time.time() - t0 < 120:
             if ready(m, 5):
-                out({"ok": True, "ativo": m, "pronto_em_s": round(time.time() - t0, 1)})
-            time.sleep(3)
-        out({"ok": False, "erro": "timeout (300 s) esperando /readyz de " + m}, 1)
-    o, err = docker("stop", MODELS[m]["container"])
-    out({"ok": not err and o is not None, "modelo": m, "docker": o, "erro": err or None})
+                out({"ok": True, "ativo": m, "backend": "gguf", "pronto_em_s": round(time.time() - t0, 1)})
+            time.sleep(1)
+        out({"ok": False, "erro": "timeout (120 s) esperando /health de " + m}, 1)
+    j, err = gguf("stop")
+    out({"ok": bool(j and j.get("ok")), "modelo": m, "gguf": j, "erro": err or None})
 
 
 def build_payload(a):
@@ -181,6 +228,7 @@ def map_score(ans, levels):
 def cmd_ask(a):
     a._m = resolve(a)
     payload = build_payload(a)
+    t0 = time.time()
     try:
         r = http("/v1/systemone", payload, a.timeout, base=murl(a._m))
     except urllib.error.HTTPError as e:
@@ -193,7 +241,7 @@ def cmd_ask(a):
     if lv and isinstance(ans, dict) and "score" in ans:
         ans["score"] = map_score(ans["score"], lv)
     out({"ok": True, "modelo": a._m, "respostas": ans,
-         "latencia_ms": u.get("latency_ms"), "prefix_cache": u.get("prefix_cache")})
+         "latencia_ms": u.get("latency_ms") if u.get("latency_ms") is not None else round((time.time() - t0) * 1000), "prefix_cache": u.get("prefix_cache")})
 
 
 def main():

@@ -25,6 +25,7 @@ O servidor é o portal autohospedado [BlueFinLab-ai/clef-lcv](https://github.com
 3. (Opcional) Rode o Full em 16 GB com os patches: [docs/03-full-na-ram.md](docs/03-full-na-ram.md).
 4. Instale as skills: [docs/04-skills.md](docs/04-skills.md).
 5. Use no chat: [docs/05-uso.md](docs/05-uso.md). Por exemplo: `$clef-flash on` e depois `$clef-flash ask`.
+6. (Recomendado) Rode o Flash como GGUF no llama.cpp, mais rápido: [docs/06-gguf.md](docs/06-gguf.md).
 
 ## Requisitos
 
@@ -49,6 +50,7 @@ Os dois **não rodam ao mesmo tempo** numa placa de 16 GB: as skills param um pa
 
 - [`docs/`](docs/): guias em português, na ordem de leitura.
 - [`skills/clef-flash`](skills/clef-flash) e [`skills/clef-full`](skills/clef-full): as skills (SKILL.md + cliente Python).
+- [`tools/clef-gguf.ps1`](tools/clef-gguf.ps1): liga/desliga o Flash GGUF (llama.cpp).
 - [`patches/`](patches/): patches `git am` sobre o clef-lcv que habilitam o Full em 16 GB.
 
 ## Créditos e licenças

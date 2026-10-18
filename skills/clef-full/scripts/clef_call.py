@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Cliente do Clef Full local (somente biblioteca padrao). Subcomandos: status, ask, start, stop."""
-import argparse, json, os, shutil, subprocess, sys, time, urllib.request, urllib.error
+import argparse, json, os, shutil, subprocess, sys, tempfile, time, urllib.request, urllib.error
 from urllib.parse import urlparse
 
 # Flash e Full nao cabem juntos nos 16 GB de VRAM: so um roda por vez.
@@ -12,6 +12,7 @@ ENV_URL = os.environ.get("CLEF_URL", "").rstrip("/")
 OWN = "full"
 OTHER = "flash"
 URL = ENV_URL or MODELS[OWN]["url"]
+GGUF_PS1 = os.path.join(os.environ.get("USERPROFILE", os.path.expanduser("~")), "tools", "clef-gguf", "clef-gguf.ps1")
 DOCKER_FALLBACK = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "DockerDesktop", "resources", "bin", "docker.exe")
 
 
@@ -68,6 +69,30 @@ def ready(m, timeout=5):
         return False
 
 
+def gguf(action):
+    """Executa clef-gguf.ps1 (Flash GGUF na 8080) e devolve (json|None, erro)."""
+    if not os.path.exists(GGUF_PS1):
+        return None, "clef-gguf.ps1 nao encontrado: " + GGUF_PS1
+    try:
+        # Saida em arquivo (nao pipe): o llama-server em background herda o handle e um pipe nunca fecharia.
+        with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as fo:
+            r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", GGUF_PS1, action],
+                               stdin=subprocess.DEVNULL, stdout=fo, stderr=subprocess.STDOUT, timeout=180)
+            fo.seek(0)
+            txt = fo.read().strip()
+    except Exception as e:
+        return None, str(e)
+    try:
+        return json.loads(txt.splitlines()[-1]), ""
+    except Exception:
+        return None, (txt or "saida invalida de clef-gguf.ps1")[:300]
+
+
+def gguf_state():
+    j, _ = gguf("status")
+    return "running" if j and j.get("alive") else "stopped"
+
+
 def active():
     for m in MODELS:
         if cstate(m) == "running":
@@ -88,6 +113,9 @@ def cmd_status(a):
             info["readyz"] = "ok" if ready(m, min(a.timeout, 10)) else "indisponivel"
             res["ativo"] = res["ativo"] or m
         res["modelos"][m] = info
+    res["outro_modelo_gguf"] = {"flash_gguf": gguf_state(), "url": MODELS[OTHER]["url"]}
+    if res["outro_modelo_gguf"]["flash_gguf"] == "running":
+        res["ativo"] = res["ativo"] or OTHER
     res["ok"] = res["modelos"][OWN].get("readyz") == "ok"
     out(res)
 
@@ -99,6 +127,9 @@ def cmd_ctl(a):
             _, err = docker("stop", MODELS[OTHER]["container"])
             if err:
                 out({"ok": False, "erro": "falha ao parar %s: %s" % (OTHER, err)}, 1)
+        j, gerr = gguf("stop")
+        if not (j and j.get("ok")):
+            out({"ok": False, "erro": "falha ao parar o Flash GGUF: " + (gerr or str(j))}, 1)
         if cstate(m) != "running":
             _, err = docker("start", MODELS[m]["container"])
             if err:

@@ -1,18 +1,19 @@
 ---
 name: clef-flash
-description: Usa o Clef Flash local (Docker, 127.0.0.1:8080) para decisões estruturadas choice, score e noul, como alternativa ao laya. Somente invocação explícita pelo usuário - "$clef-flash on", "$clef-flash off", "$clef-flash status", "$clef-flash ask", "$clef-flash start" ou "$clef-flash stop" (ou "/clef-flash ..."). Nunca use por conta própria.
+description: Usa o Clef Flash local (llama.cpp GGUF, 127.0.0.1:8080) para decisões estruturadas choice, score e noul, como alternativa ao laya. Somente invocação explícita pelo usuário - "$clef-flash on", "$clef-flash off", "$clef-flash status", "$clef-flash ask", "$clef-flash start" ou "$clef-flash stop" (ou "/clef-flash ..."). Nunca use por conta própria.
 disable-model-invocation: true
 allow_implicit_invocation: false
 ---
 
 # Skill `clef-flash`
 
-Usa só o **Clef Flash** (container `clef-flash`, `127.0.0.1:8080`, modelo da API `clef-flash`). Regra de ouro: **o Clef decide; o modelo principal escreve.**
+Usa só o **Clef Flash** (servidor llama.cpp GGUF Q4_K_M, `127.0.0.1:8080`, modelo da API `clef-flash`; gerenciado por `~/tools/clef-gguf/clef-gguf.ps1`). Regra de ouro: **o Clef decide; o modelo principal escreve.**
 
 - Cliente: `scripts/clef_call.py` (biblioteca padrão do Python 3; no Windows `python` ou `py -3`). Modelo fixo; independe da skill `clef`.
 - **Nunca envie dados para outro endereço**; o script recusa hosts não locais (`CLEF_URL` sobrescreve). Sem chaves de API.
 - Flash e Full **não rodam juntos** (16 GB de VRAM): iniciar este para o outro container antes.
-- Perfil: ~5,5 GB de VRAM, rápido; ideal para volume e decisões rápidas. Primeira chamada com contexto novo é mais lenta (~11 s para construir o prefixo; repetir leva ~0,3 s): avise antes.
+- Backend: llama.cpp GGUF Q4_K_M (~50 ms por chamada, ~6,7 GB de VRAM, sobe em segundos). O container Docker `clef-flash` fica só de reserva (restart policy `no`); para voltar a ele manualmente: `clef-gguf.ps1 stop` e depois `docker start clef-flash` (readiness em `/readyz`).
+- O GGUF expõe `/health` (não há `/readyz`); o script usa `/health` com fallback para `/readyz`.
 
 ## Estado (só na conversa atual)
 
@@ -23,17 +24,17 @@ Começa **desativado**. Não grave em arquivo. Nenhum `ask` antes de `$clef-flas
 ### `$clef-flash on`
 1. Rode `python scripts/clef_call.py status`.
 2. Se `ok` for `true`: ative. Estado: `⚪ Clef Flash não usado — ativado, nenhuma decisão feita ainda`.
-3. Se o container `clef-flash` não estiver rodando: **não ative nem inicie**; **pergunte** se pode iniciá-lo (isso para o outro container) e espere o sim. Com o sim, rode `python scripts/clef_call.py start` (espera o `/readyz`, até 300 s) e ative.
-4. Se o Docker não for encontrado, informe e não ative.
+3. Se o servidor GGUF não estiver rodando: **não ative nem inicie**; **pergunte** se pode iniciá-lo (isso para o container do Full, se estiver rodando) e espere o sim. Com o sim, rode `python scripts/clef_call.py start` (espera o `/health`, até 120 s) e ative.
+4. Se o `clef-gguf.ps1` não for encontrado, informe e não ative.
 
 ### `$clef-flash off`
 Desative. Não rode o script. Estado: `⚪ Clef Flash não usado — desativado`.
 
 ### `$clef-flash status`
-Rode `status`: estado da skill, containers, `readyz`. Estado: `⚪ Clef Flash não usado — apenas status consultado`.
+Rode `status`: estado da skill, processo GGUF e `/health`, container do Full. Estado: `⚪ Clef Flash não usado — apenas status consultado`.
 
 ### `$clef-flash start` / `$clef-flash stop`
-Só quando o usuário digitar o comando. `python scripts/clef_call.py start` para o outro container, inicia este e espera o `/readyz`. `stop` para só este. Nunca por conta própria.
+Só quando o usuário digitar o comando. `python scripts/clef_call.py start` para o container do Full (e o Docker Flash, se estiver de pé), roda `clef-gguf.ps1 start` e espera o `/health`. `stop` roda `clef-gguf.ps1 stop` (só este). Nunca por conta própria.
 
 ### `$clef-flash ask`
 Monte o pedido e rode:
@@ -72,4 +73,4 @@ Toda resposta termina com **exatamente um**:
 
 ## Segurança
 
-- Só `start`/`stop` dos containers `clef-flash` e `clef-full`. Nunca instale pacotes nem rode outros comandos Docker. Nunca peça chaves no chat.
+- Só `start`/`stop` do `clef-gguf.ps1` e dos containers `clef-flash` e `clef-full`. Nunca instale pacotes nem rode outros comandos Docker. Nunca peça chaves no chat.

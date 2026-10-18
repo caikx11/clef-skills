@@ -11,7 +11,7 @@ Usa só o **Clef Full** (container `clef-full`, `127.0.0.1:8081`, modelo da API 
 
 - Cliente: `scripts/clef_call.py` (biblioteca padrão do Python 3; no Windows `python` ou `py -3`). Modelo fixo; independe da skill `clef`.
 - **Nunca envie dados para outro endereço**; o script recusa hosts não locais (`CLEF_URL` sobrescreve). Sem chaves de API.
-- Flash e Full **não rodam juntos** (16 GB de VRAM): iniciar este para o outro container antes.
+- Flash e Full **não rodam juntos** (16 GB de VRAM): iniciar este para o outro antes (o Flash agora é o servidor GGUF `~/tools/clef-gguf/clef-gguf.ps1`; o container Docker `clef-flash` é só reserva).
 - **Cuidados do Full:** usa ~12,7 GB de VRAM (pico ~14,7 GB com ~10k tokens): mantenha entradas em **até ~8k tokens**. Subir leva ~1-2 min (timeout 5 min). Latência: ~1-1,5 s frio, ~0,4 s quente.
 
 ## Estado (só na conversa atual)
@@ -23,17 +23,17 @@ Começa **desativado**. Não grave em arquivo. Nenhum `ask` antes de `$clef-full
 ### `$clef-full on`
 1. Rode `python scripts/clef_call.py status`.
 2. Se `ok` for `true`: ative. Estado: `⚪ Clef Full não usado — ativado, nenhuma decisão feita ainda`.
-3. Se o container `clef-full` não estiver rodando: **não ative nem inicie**; **pergunte** se pode iniciá-lo (isso para o outro container e leva ~1-2 min) e espere o sim. Com o sim, rode `python scripts/clef_call.py start` (espera o `/readyz`, até 300 s) e ative.
+3. Se o container `clef-full` não estiver rodando: **não ative nem inicie**; **pergunte** se pode iniciá-lo (isso para o Flash, GGUF e Docker, e leva ~1-2 min) e espere o sim. Com o sim, rode `python scripts/clef_call.py start` (espera o `/readyz`, até 300 s) e ative.
 4. Se o Docker não for encontrado, informe e não ative.
 
 ### `$clef-full off`
 Desative. Não rode o script. Estado: `⚪ Clef Full não usado — desativado`.
 
 ### `$clef-full status`
-Rode `status`: estado da skill, containers, `readyz`. Estado: `⚪ Clef Full não usado — apenas status consultado`.
+Rode `status`: estado da skill, containers, `readyz`; o Flash GGUF aparece como "outro modelo" (`outro_modelo_gguf`). Estado: `⚪ Clef Full não usado — apenas status consultado`.
 
 ### `$clef-full start` / `$clef-full stop`
-Só quando o usuário digitar o comando. `python scripts/clef_call.py start` para o outro container, inicia este e espera o `/readyz` (leva ~1-2 min). `stop` para só este. Nunca por conta própria.
+Só quando o usuário digitar o comando. `python scripts/clef_call.py start` para o container `clef-flash` (se estiver rodando) e o servidor GGUF (`clef-gguf.ps1 stop`), inicia este e espera o `/readyz` (leva ~1-2 min). `stop` para só este. Nunca por conta própria.
 
 ### `$clef-full ask`
 Monte o pedido e rode:
@@ -71,4 +71,4 @@ Toda resposta termina com **exatamente um**:
 
 ## Segurança
 
-- Só `start`/`stop` dos containers `clef-flash` e `clef-full`. Nunca instale pacotes nem rode outros comandos Docker. Nunca peça chaves no chat.
+- Só `start`/`stop` dos containers `clef-flash` e `clef-full` e `clef-gguf.ps1 stop`. Nunca instale pacotes nem rode outros comandos Docker. Nunca peça chaves no chat.
